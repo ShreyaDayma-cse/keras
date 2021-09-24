@@ -870,13 +870,38 @@ class Model(base_layer.Layer, version_utils.ModelVersionSelector):
       write_scalar_summaries(outputs, step=model._train_counter)  # pylint: disable=protected-access
       return outputs
 
-    if (self._steps_per_execution is None or
-        self._steps_per_execution.numpy().item() == 1):
+    # Special case if steps_per_execution is one.
+    if self._steps_per_execution.numpy().item() == 1:
 
       def train_function(iterator):
-        """Runs a training execution with one step."""
+        """Runs a training execution with a single step."""
         return step_function(self, iterator)
 
+      if not self.run_eagerly:
+        train_function = tf.function(
+            train_function, experimental_relax_shapes=True)
+
+      if self._cluster_coordinator:
+        self.train_function = lambda it: self._cluster_coordinator.schedule(  # pylint: disable=g-long-lambda
+            train_function, args=(it,))
+      else:
+        self.train_function = train_function
+
+    # If we're using a coordinator, use the value of self._steps_per_execution
+    # at the time the function is called/scheduled, and not when it is actually
+    # executed.
+    elif self._cluster_coordinator:
+
+      def train_function(iterator, steps_per_execution):
+        """Runs a training execution with multiple steps."""
+        outputs = step_function(self, iterator)
+        for _ in tf.range(steps_per_execution - 1):
+          outputs = step_function(self, iterator)
+        return outputs
+
+      self.train_function = lambda it: self._cluster_coordinator.schedule(  # pylint: disable=g-long-lambda
+          train_function,
+          args=(it, self._steps_per_execution.numpy().item()))
     else:
 
       def train_function(iterator):
@@ -885,16 +910,10 @@ class Model(base_layer.Layer, version_utils.ModelVersionSelector):
           outputs = step_function(self, iterator)
         return outputs
 
-    if not self.run_eagerly:
-      train_function = tf.function(
-          train_function, experimental_relax_shapes=True)
-      self.train_tf_function = train_function
-
-    self.train_function = train_function
-
-    if self._cluster_coordinator:
-      self.train_function = lambda iterator: self._cluster_coordinator.schedule(  # pylint: disable=g-long-lambda
-          train_function, args=(iterator,))
+      self.train_function = train_function
+      if not self.run_eagerly:
+        self.train_function = tf.function(
+            self.train_function, experimental_relax_shapes=True)
 
     return self.train_function
 
@@ -1358,30 +1377,50 @@ class Model(base_layer.Layer, version_utils.ModelVersionSelector):
           outputs, self.distribute_strategy, reduction='first')
       return outputs
 
-    if (self._steps_per_execution is None or
-        self._steps_per_execution.numpy().item() == 1):
+    # Special case if steps_per_execution is one.
+    if self._steps_per_execution.numpy().item() == 1:
 
       def test_function(iterator):
-        """Runs an evaluation execution with one step."""
+        """Runs a test execution with a single step."""
         return step_function(self, iterator)
 
+      if not self.run_eagerly:
+        test_function = tf.function(
+            test_function, experimental_relax_shapes=True)
+
+      if self._cluster_coordinator:
+        self.test_function = lambda it: self._cluster_coordinator.schedule(  # pylint: disable=g-long-lambda
+            test_function, args=(it,))
+      else:
+        self.test_function = test_function
+
+    # If we're using a coordinator, use the value of self._steps_per_execution
+    # at the time the function is called/scheduled, and not when it is actually
+    # executed.
+    elif self._cluster_coordinator:
+
+      def test_function(iterator, steps_per_execution):
+        """Runs a test execution with multiple steps."""
+        outputs = step_function(self, iterator)
+        for _ in tf.range(steps_per_execution - 1):
+          outputs = step_function(self, iterator)
+        return outputs
+
+      self.test_function = lambda it: self._cluster_coordinator.schedule(  # pylint: disable=g-long-lambda
+          test_function,
+          args=(it, self._steps_per_execution.numpy().item()))
     else:
 
       def test_function(iterator):
-        """Runs an evaluation execution with multiple steps."""
+        """Runs a test execution with multiple steps."""
         for _ in tf.range(self._steps_per_execution):
           outputs = step_function(self, iterator)
         return outputs
 
-    if not self.run_eagerly:
-      test_function = tf.function(
-          test_function, experimental_relax_shapes=True)
-
-    self.test_function = test_function
-
-    if self._cluster_coordinator:
-      self.test_function = lambda iterator: self._cluster_coordinator.schedule(  # pylint: disable=g-long-lambda
-          test_function, args=(iterator,))
+      self.test_function = test_function
+      if not self.run_eagerly:
+        self.test_function = tf.function(
+            self.test_function, experimental_relax_shapes=True)
 
     return self.test_function
 
@@ -1613,11 +1652,12 @@ class Model(base_layer.Layer, version_utils.ModelVersionSelector):
           outputs, self.distribute_strategy, reduction='concat')
       return outputs
 
+    # Special case if steps_per_execution is one.
     if (self._steps_per_execution is None or
         self._steps_per_execution.numpy().item() == 1):
 
       def predict_function(iterator):
-        """Runs an evaluation execution with one step."""
+        """Runs an evaluation execution with a single step."""
         return step_function(self, iterator)
 
     else:
@@ -1635,11 +1675,11 @@ class Model(base_layer.Layer, version_utils.ModelVersionSelector):
                                           outputs, step_outputs)
         return outputs
 
-    if not self.run_eagerly:
-      predict_function = tf.function(
-          predict_function, experimental_relax_shapes=True)
-
     self.predict_function = predict_function
+    if not self.run_eagerly:
+      self.predict_function = tf.function(
+          self.predict_function, experimental_relax_shapes=True)
+
     return self.predict_function
 
   @traceback_utils.filter_traceback
